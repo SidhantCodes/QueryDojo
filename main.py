@@ -11,6 +11,8 @@ from langchain.prompts import PromptTemplate
 from langchain.chains.question_answering import load_qa_chain
 from langchain.memory import ConversationBufferMemory
 
+import azure.cognitiveservices.speech as speechsdk
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware  
@@ -38,6 +40,25 @@ def get_text_from_pdf(pdfs):
         for page in reader.pages:
             text += page.extract_text()
     return text
+
+def get_text_from_audio(audio):
+    speech_config=speechsdk.SpeechConfig(subscription=os.getenv("AZURE_SPEECH_KEY"), region=os.getenv("AZURE_SPEECH_REGION"))
+
+    speech_config.speech_recognition_language="en-US"
+    audio_config = speechsdk.audio.AudioConfig(filename="test.wav")
+    speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+
+    speech_recognition_result = speech_recognizer.recognize_once_async().get()
+    speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+    if speech_recognition_result.reason == speechsdk.ResultReason.RecognizedSpeech:
+        # print("Recognized: {}".format(speech_recognition_result.text))
+        return speech_recognition_result.text
+    elif speech_recognition_result.reason == speechsdk.ResultReason.NoMatch:
+        return "No speech could be recognized: {}".format(speech_recognition_result.no_match_details)
+    elif speech_recognition_result.reason == speechsdk.ResultReason.Canceled:
+        cancellation_details = speech_recognition_result.cancellation_details
+        return "Speech Recognition canceled: {}".format(cancellation_details.reason)
+    
 
 # Function to split text into manageable chunks
 def split_text(text):
@@ -143,6 +164,29 @@ async def upload_pdfs(files: list[UploadFile] = File(...)):
             pdf.close()
         for file in files:
             os.remove(file.filename)
+
+    return JSONResponse(content={"message": result})
+
+@app.post("/upload_audio/")
+async def upload_audio(file: UploadFile = File(...)):
+    if file.content_type != "audio/wav":
+        raise HTTPException(status_code=400, detail="Only .wav files are allowed")
+    
+    try:
+        # Save uploaded audio file temporarily
+        with open("temp_audio.wav", "wb") as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+        # Extract text from the audio file
+        text = get_text_from_audio("temp_audio.wav")
+        # Split extracted text into chunks
+        chunks = split_text(text)
+        # Create embeddings and save FAISS index
+        result = get_embeddings(chunks)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Remove temporary audio file
+        os.remove("temp_audio.wav")
 
     return JSONResponse(content={"message": result})
 
