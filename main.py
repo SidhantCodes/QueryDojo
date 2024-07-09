@@ -13,6 +13,10 @@ from langchain.memory import ConversationBufferMemory
 
 import azure.cognitiveservices.speech as speechsdk
 
+from azure.ai.vision.imageanalysis import ImageAnalysisClient
+from azure.ai.vision.imageanalysis.models import VisualFeatures
+from azure.core.credentials import AzureKeyCredential
+
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -49,13 +53,12 @@ def get_text_from_audio(audio):
     speech_config=speechsdk.SpeechConfig(subscription=os.getenv("AZURE_SPEECH_KEY"), region=os.getenv("AZURE_SPEECH_REGION"))
 
     speech_config.speech_recognition_language="en-US"
-    audio_config = speechsdk.audio.AudioConfig(filename="test.wav")
+    audio_config = speechsdk.audio.AudioConfig(filename=audio)
     speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
 
     speech_recognition_result = speech_recognizer.recognize_once_async().get()
     speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
     if speech_recognition_result.reason == speechsdk.ResultReason.RecognizedSpeech:
-        # print("Recognized: {}".format(speech_recognition_result.text))
         return speech_recognition_result.text
     elif speech_recognition_result.reason == speechsdk.ResultReason.NoMatch:
         return "No speech could be recognized: {}".format(speech_recognition_result.no_match_details)
@@ -74,6 +77,66 @@ def get_ytvid_transcript(link):
     
     return transcript
 
+def get_image_data_text(image_data):
+    try:
+        endpoint = os.getenv("VISION_ENDPOINT")
+        key = os.getenv("VISION_KEY")
+    except KeyError:
+        print("Missing environment variable 'VISION_ENDPOINT' or 'VISION_KEY'")
+        print("Set them before running this sample.")
+        exit()
+    
+    # Create an Image Analysis client
+    client = ImageAnalysisClient(
+        endpoint=endpoint,
+        credential=AzureKeyCredential(key)
+    )
+    visual_features =[
+        VisualFeatures.TAGS,
+        VisualFeatures.OBJECTS,
+        VisualFeatures.CAPTION,
+        VisualFeatures.DENSE_CAPTIONS,
+        VisualFeatures.READ,
+        VisualFeatures.SMART_CROPS,
+        VisualFeatures.PEOPLE,
+    ]
+    result = client._analyze_from_image_data(
+        image_content=image_data,
+        visual_features=visual_features,
+        gender_neutral_caption=True
+    )
+    tags_txt = "Tags: "
+    obj_txt = "Objects: "
+    caption_txt = "Caption: "
+    dense_cap_txt = "Dense Captions: "
+    read_txt = "Read: "
+
+    if result.tags is not None:
+        for obj in result.tags['values']:
+            tags_txt += obj['name']+","
+        tags_txt=tags_txt[:-1]
+
+    if result.objects is not None:
+        for obj in result.objects['values'][0]['tags']:
+            obj_txt += f"{obj['name']}: confidence score: {obj['confidence']},"
+        obj_txt=obj_txt[:-1]
+
+    if result.caption is not None:
+        caption_txt+=f"{result.caption['text']}- confidence score: {result.caption['confidence']}"
+
+    if result.dense_captions is not None:
+        for obj in result.dense_captions['values']:
+            dense_cap_txt+=f"\n{obj['text']}- confidence score: {obj['confidence']}\n"
+
+    if result.read is not None:
+        for obj in result.read['blocks'][0]['lines']:
+            read_txt+=f"\n{obj['text']}\n"
+
+    formatted_image_analysis_result = f"Image analysis results:\n{tags_txt}\n{obj_txt}\n{caption_txt}\n{dense_cap_txt}\n{read_txt}\n"
+    
+    return formatted_image_analysis_result
+
+
 # Function to split text into manageable chunks
 def split_text(text):
     txt_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
@@ -82,7 +145,7 @@ def split_text(text):
     return chunks
 
 # Function to create and save FAISS index from text chunks
-def get_embeddings(chunks):
+def create_vectorstore(chunks):
     embeddings = AzureOpenAIEmbeddings(
         azure_deployment=os.getenv("AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME"),
         openai_api_version="2023-05-15",
@@ -172,7 +235,7 @@ async def upload_pdfs(files: list[UploadFile] = File(...)):
         chunks = split_text(text)
 
         # Create embeddings and save FAISS index
-        result = get_embeddings(chunks)
+        result = create_vectorstore(chunks)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -191,19 +254,19 @@ async def upload_audio(file: UploadFile = File(...)):
     
     try:
         # Save uploaded audio file temporarily
-        with open("temp_audio.wav", "wb") as temp_file:
+        with open(f"temp_audio.wav", "wb") as temp_file:
             shutil.copyfileobj(file.file, temp_file)
         # Extract text from the audio file
-        text = get_text_from_audio("temp_audio.wav")
+        text = get_text_from_audio(f"temp_audio.wav")
         # Split extracted text into chunks
         chunks = split_text(text)
         # Create embeddings and save FAISS index
-        result = get_embeddings(chunks)
+        result = create_vectorstore(chunks)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         # Remove temporary audio file
-        os.remove("temp_audio.wav")
+        os.remove(f"temp_audio.wav")
 
     return JSONResponse(content={"message": result})
 
@@ -212,11 +275,30 @@ async def youtube_video_upload(link):
     try:
         transcript = get_ytvid_transcript(link)
         chunks = split_text(transcript)
-        result = get_embeddings(chunks)
+        result = create_vectorstore(chunks)
 
         return JSONResponse(content={"message":result})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post('/upload_image/')
+async def upload_image(image: UploadFile = File(...)):
+    try:
+        extension = image.filename.split('.')[1]
+        with open(f"temp_image.{extension}", "wb") as temp_file:
+            shutil.copyfileobj(image.file, temp_file)
+        with open(f"temp_image.{extension}", "rb") as f:
+            image_data = f.read()
+        
+        image_text=get_image_data_text(image_data)
+        chunks=split_text(image_text)
+        result=create_vectorstore(chunks)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        os.remove(f"temp_image.{extension}")
+
+    return JSONResponse(content={"message":result})
 
 # Endpoint to query the chatbot with user input
 @app.post("/query/")
