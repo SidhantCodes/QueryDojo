@@ -13,9 +13,13 @@ from langchain.memory import ConversationBufferMemory
 
 import azure.cognitiveservices.speech as speechsdk
 
+from youtube_transcript_api import YouTubeTranscriptApi
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware  
+
+
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -59,6 +63,16 @@ def get_text_from_audio(audio):
         cancellation_details = speech_recognition_result.cancellation_details
         return "Speech Recognition canceled: {}".format(cancellation_details.reason)
     
+def get_ytvid_transcript(link):
+    vid_id = link.split("=")[1]
+    transcript = ""
+
+    transcript_list = YouTubeTranscriptApi.get_transcript(vid_id)
+
+    for obj in transcript_list:
+        transcript+=obj['text']
+    
+    return transcript
 
 # Function to split text into manageable chunks
 def split_text(text):
@@ -84,15 +98,16 @@ def get_embeddings(chunks):
 # Define the conversation prompt template
 def get_conversation_chain():
     # Template for conversation between chatbot and human
-    prompt_tempt = """You are a chatbot, who goes by the name 'Superior DocuDojo' having a conversation with a human.
+    prompt_tempt = """You are a chatbot, who goes by the name 'EduDojo' having a conversation with a human.
 
-    Given the following extracted parts of a text book of class 10th science and a question, create a final answer. Do not give a wrong answer. If you dont know the answer to a question, just respond with 'Sorry, the answer to the given question is not available in the provided context'. Dont provide wrong answers. If a user asks a questions that goes beyond the provided context, kindly ask the user to ask questions that are relevant to the provided context
+    Given the following extracted parts of a document/audio file/video transcript and a question, create a final answer. Do not give a wrong answer. If you don't know the answer to a question, just respond with 'Sorry, the answer to the given question is not available in the provided context'. Don't provide wrong answers. If a user asks a question that goes beyond the provided context, kindly ask the user to ask questions that are relevant to the provided context.
 
     {context}
 
     {chat_history}
     Human: {human_input}
     Chatbot:"""
+
 
     # Initialize Azure OpenAI chat model
     model = AzureChatOpenAI(
@@ -130,6 +145,8 @@ def user_input(user_query, chain):
     # Invoke the conversation chain with input documents and user query
     res = chain.invoke({"input_documents": docs, "human_input": user_query})
     return res["output_text"]
+
+
 
 # Event handler to initialize conversation chain on application startup
 @app.on_event("startup")
@@ -189,6 +206,17 @@ async def upload_audio(file: UploadFile = File(...)):
         os.remove("temp_audio.wav")
 
     return JSONResponse(content={"message": result})
+
+@app.post('/youtube_vid/')
+async def youtube_video_upload(link):
+    try:
+        transcript = get_ytvid_transcript(link)
+        chunks = split_text(transcript)
+        result = get_embeddings(chunks)
+
+        return JSONResponse(content={"message":result})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Endpoint to query the chatbot with user input
 @app.post("/query/")
