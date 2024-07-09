@@ -48,7 +48,7 @@ def get_text_from_pdf(pdfs):
         for page in reader.pages:
             text += page.extract_text()
     return text
-
+# Function to transcribe audio to text
 def get_text_from_audio(audio):
     speech_config=speechsdk.SpeechConfig(subscription=os.getenv("AZURE_SPEECH_KEY"), region=os.getenv("AZURE_SPEECH_REGION"))
 
@@ -65,7 +65,7 @@ def get_text_from_audio(audio):
     elif speech_recognition_result.reason == speechsdk.ResultReason.Canceled:
         cancellation_details = speech_recognition_result.cancellation_details
         return "Speech Recognition canceled: {}".format(cancellation_details.reason)
-    
+# Function to get transcript of youtube videos
 def get_ytvid_transcript(link):
     vid_id = link.split("=")[1]
     transcript = ""
@@ -76,7 +76,7 @@ def get_ytvid_transcript(link):
         transcript+=obj['text']
     
     return transcript
-
+# Function to analyse image and generate relevant information in text
 def get_image_data_text(image_data):
     try:
         endpoint = os.getenv("VISION_ENDPOINT")
@@ -136,7 +136,6 @@ def get_image_data_text(image_data):
     
     return formatted_image_analysis_result
 
-
 # Function to split text into manageable chunks
 def split_text(text):
     txt_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
@@ -157,20 +156,64 @@ def create_vectorstore(chunks):
     vec_store.save_local("index")
     return "Creation of Vector Store completed"
 
+# Define prompt templates for different file formats
+pdf_prompt_template = """You are a chatbot named 'QueryDojo' having a conversation with a human.
+
+Given the following extracted parts of a document (PDF) and a question, create a final answer. Do not give a wrong answer. If you don't know the answer to a question, just respond with 'Sorry, the answer to the given question is not available in the provided context'. Don't provide wrong answers. If a user asks a question that goes beyond the provided context, kindly ask the user to ask questions that are relevant to the provided context.
+
+{context}
+
+{chat_history}
+Human: {human_input}
+Chatbot:"""
+
+audio_prompt_template = """You are a chatbot named 'QueryDojo' having a conversation with a human.
+
+Given the following extracted parts of an audio file transcription and a question, create a final answer. Do not give a wrong answer. If you don't know the answer to a question, just respond with 'Sorry, the answer to the given question is not available in the provided context'. Don't provide wrong answers. If a user asks a question that goes beyond the provided context, kindly ask the user to ask questions that are relevant to the provided context.
+
+{context}
+
+{chat_history}
+Human: {human_input}
+Chatbot:"""
+
+video_prompt_template = """You are a chatbot named 'QueryDojo' having a conversation with a human.
+
+Given the following extracted parts of a youtub video transcript and a question, create a final answer. Do not give a wrong answer. If you don't know the answer to a question, just respond with 'Sorry, the answer to the given question is not available in the provided context'. Don't provide wrong answers. If a user asks a question that goes beyond the provided context, kindly ask the user to ask questions that are relevant to the provided context.
+
+{context}
+
+{chat_history}
+Human: {human_input}
+Chatbot:"""
+
+image_prompt_template = """You are a chatbot named 'QueryDojo' having a conversation with a human.
+
+Given the following extracted parts of an image analysis and a question, create a final answer. The provided context is the result of OCR performed on the image to extract all necessary information from the image, like captions, tags, read(the texts written in it). If anything is not there such as Captions ignore it. Do not give a wrong answer. If you don't know the answer to a question, just respond with 'Sorry, the answer to the given question is not available in the provided context'. Don't provide wrong answers. If a user asks a question that goes beyond the provided context, kindly ask the user to ask questions that are relevant to the provided context.
+
+{context}
+
+{chat_history}
+Human: {human_input}
+Chatbot:"""
+
+# Function to get the appropriate prompt template based on the file type
+def get_prompt_template(file_type):
+    if file_type == "pdf":
+        return pdf_prompt_template
+    elif file_type == "audio":
+        return audio_prompt_template
+    elif file_type == "video":
+        return video_prompt_template
+    elif file_type == "image":
+        return image_prompt_template
+    else:
+        raise ValueError("Unsupported file type")
 
 # Define the conversation prompt template
-def get_conversation_chain():
-    # Template for conversation between chatbot and human
-    prompt_tempt = """You are a chatbot, who goes by the name 'EduDojo' having a conversation with a human.
-
-    Given the following extracted parts of a document/audio file/video transcript and a question, create a final answer. Do not give a wrong answer. If you don't know the answer to a question, just respond with 'Sorry, the answer to the given question is not available in the provided context'. Don't provide wrong answers. If a user asks a question that goes beyond the provided context, kindly ask the user to ask questions that are relevant to the provided context.
-
-    {context}
-
-    {chat_history}
-    Human: {human_input}
-    Chatbot:"""
-
+def get_conversation_chain(file_type):
+    # Get the appropriate prompt template based on the file type
+    prompt_tempt = get_prompt_template(file_type)
 
     # Initialize Azure OpenAI chat model
     model = AzureChatOpenAI(
@@ -210,12 +253,14 @@ def user_input(user_query, chain):
     return res["output_text"]
 
 
-
 # Event handler to initialize conversation chain on application startup
 @app.on_event("startup")
 async def startup_event():
-    global chain
-    chain = get_conversation_chain()
+    global pdf_chain, audio_chain, video_chain, image_chain
+    pdf_chain = get_conversation_chain("pdf")
+    audio_chain = get_conversation_chain("audio")
+    video_chain = get_conversation_chain("video")
+    image_chain = get_conversation_chain("image")
 
 # Endpoint to upload PDF files and create text chunks and embeddings
 @app.post("/upload_pdfs/")
@@ -245,8 +290,9 @@ async def upload_pdfs(files: list[UploadFile] = File(...)):
         for file in files:
             os.remove(file.filename)
 
-    return JSONResponse(content={"message": result})
+    return JSONResponse(content={"message": result, "chain": "pdf"})
 
+# Endpoint to upload audio and create vector store
 @app.post("/upload_audio/")
 async def upload_audio(file: UploadFile = File(...)):
     if file.content_type != "audio/wav":
@@ -268,8 +314,9 @@ async def upload_audio(file: UploadFile = File(...)):
         # Remove temporary audio file
         os.remove(f"temp_audio.wav")
 
-    return JSONResponse(content={"message": result})
+    return JSONResponse(content={"message": result, "chain": "audio"})
 
+# Endpoint to upload link to youtube video and create vector store based on its transcript
 @app.post('/youtube_vid/')
 async def youtube_video_upload(link):
     try:
@@ -277,10 +324,10 @@ async def youtube_video_upload(link):
         chunks = split_text(transcript)
         result = create_vectorstore(chunks)
 
-        return JSONResponse(content={"message":result})
+        return JSONResponse(content={"message": result, "chain": "video"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+# Endpoint to upload image and create vector store based on its text analysis
 @app.post('/upload_image/')
 async def upload_image(image: UploadFile = File(...)):
     try:
@@ -298,15 +345,23 @@ async def upload_image(image: UploadFile = File(...)):
     finally:
         os.remove(f"temp_image.{extension}")
 
-    return JSONResponse(content={"message":result})
+    return JSONResponse(content={"message": result, "chain": "image"})
 
 # Endpoint to query the chatbot with user input
 @app.post("/query/")
-async def query(user_query: str):
-    if chain is None:
-        raise HTTPException(status_code=500, detail="Chain is not initialized")
+async def query(user_query: str, chain_type: str):
+    if chain_type == "pdf":
+        chain = pdf_chain
+    elif chain_type == "audio":
+        chain = audio_chain
+    elif chain_type == "video":
+        chain = video_chain
+    elif chain_type == "image":
+        chain = image_chain
     elif 'index' not in os.listdir('.'):
         raise HTTPException(status_code=500, detail="Please create vector store")
+    else:
+        raise HTTPException(status_code=400, detail="Invalid chain type")
     
     try:
         # Invoke user input processing with conversation chain
